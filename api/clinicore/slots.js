@@ -1,14 +1,17 @@
 export default async function handler(req, res) {
   try {
     const token = process.env.CLINICORE_WAPI_TOKEN;
+    const { service } = req.query;
 
-    const { serviceId } = req.query;
-
-    if (!serviceId) {
-      return res.status(400).json({ error: "Missing serviceId" });
+    if (!token) {
+      return res.status(500).json({ error: "Missing CLINICORE_WAPI_TOKEN" });
     }
 
-    const url = `https://wapi.clinicoresuite.app/slots?serviceId=${serviceId}`;
+    if (!service) {
+      return res.status(400).json({ error: "Missing service" });
+    }
+
+    const url = `https://wapi.clinicoresuite.app/slots?service=${encodeURIComponent(service)}`;
 
     const response = await fetch(url, {
       method: "GET",
