@@ -63,9 +63,11 @@ export default async function handler(req, res) {
     if (body.document_country) {
       payload.set("document_country", String(body.document_country));
     }
+
     if (body.document_type) {
       payload.set("document_type", String(body.document_type));
     }
+
     if (body.document_value) {
       payload.set("document_value", String(body.document_value));
     }
@@ -84,21 +86,14 @@ export default async function handler(req, res) {
     let data;
     try {
       data = JSON.parse(text);
-    } catch {
-      return res.status(500).json({
-        error: "Invalid JSON from booking endpoint",
+      return res.status(response.status).json(data);
+    } catch (e) {
+      return res.status(200).json({
+        success: response.ok,
+        status: response.status,
         raw: text
       });
     }
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: data.error || data.message || "Booking failed",
-        details: data
-      });
-    }
-
-    return res.status(200).json(data);
   } catch (error) {
     return res.status(500).json({
       error: "Unexpected booking proxy error",
