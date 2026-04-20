@@ -9,11 +9,12 @@ export default async function handler(req, res) {
 
   try {
     const token = process.env.CLINICORE_WAPI_TOKEN;
-    const { page, name, remote, offices, users, user, categoryId } = req.query;
 
     if (!token) {
       return res.status(500).json({ error: "Missing CLINICORE_WAPI_TOKEN" });
     }
+
+    const { page, name, remote, offices, users, user, categoryId } = req.query;
 
     const url = new URL("https://wapi.clinicoresuite.app/services");
 
@@ -41,15 +42,17 @@ export default async function handler(req, res) {
 
     const text = await response.text();
 
+    let data;
     try {
-      const data = JSON.parse(text);
-      return res.status(response.status).json(data);
+      data = JSON.parse(text);
     } catch (e) {
-      return res.status(500).json({
-        error: "Invalid JSON from Clinicoresuite",
+      return res.status(502).json({
+        error: "Invalid JSON from Clinicoresuite services endpoint",
         raw: text
       });
     }
+
+    return res.status(response.status).json(data);
   } catch (error) {
     return res.status(500).json({
       error: "Unexpected proxy error",
