@@ -1,3 +1,27 @@
+const CATEGORY_NAMES = {
+  368: "Botulinumtoxin",
+  374: "Biostimulation",
+  380: "PRP",
+  383: "Infusionstherapie",
+  389: "Beratung",
+  392: "Laser"
+};
+
+function categoryNameFromId(id) {
+  return CATEGORY_NAMES[String(id)] || `Kategorie ${id}`;
+}
+
+function categoryDescriptionFromName(name) {
+  return {
+    Beratung: "Beratung.",
+    Biostimulation: "Skinbooster, Polynukleotide.",
+    Botulinumtoxin: "Botox-Behandlungen.",
+    Infusionstherapie: "Performance Drips.",
+    Laser: "Laserbehandlungen.",
+    PRP: "PRP Face, Haare, Augen."
+  }[name] || "";
+}
+
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -13,115 +37,29 @@ function parseItems(data) {
   return [];
 }
 
-function getCategory(service) {
-  const category = service?.category || service?.serviceCategory || service?.service_category || null;
+async function fetchAllServices(req) {
+  const token = process.env.CLINICORE_WAPI_TOKEN;
 
-  if (category && typeof category === "object") {
-    const id =
-      category.id ??
-      category.uuid ??
-      category["@id"] ??
-      category.value ??
-      category.code ??
-      null;
-
-    const name = String(
-      category.name ??
-      category.title ??
-      category.label ??
-      category.description ??
-      ""
-    ).trim();
-
-    const description = String(
-      category.description ??
-      category.subtitle ??
-      category.note ??
-      ""
-    ).trim();
-
-    if (name) {
-      return {
-        id: id !== null && id !== undefined ? String(id) : name,
-        name,
-        description
-      };
-    }
+  if (!token) {
+    throw new Error("Missing CLINICORE_WAPI_TOKEN");
   }
 
-  const id =
-    service?.categoryId ??
-    service?.category_id ??
-    service?.categoryUuid ??
-    service?.category_uuid ??
-    null;
-
-  const name = String(
-    service?.categoryName ??
-    service?.category_name ??
-    service?.categoryTitle ??
-    service?.category_title ??
-    ""
-  ).trim();
-
-  if (name) {
-    return {
-      id: id !== null && id !== undefined ? String(id) : name,
-      name,
-      description: ""
-    };
-  }
-
-  return {
-    id: "uncategorized",
-    name: "Weitere Behandlungen",
-    description: ""
-  };
-}
-
-function getServiceId(service) {
-  return String(
-    service?.uuid ??
-    service?.id ??
-    service?.["@id"] ??
-    service?.name ??
-    Math.random()
-  );
-}
-
-function normalizeService(service, category) {
-  return {
-    uuid: service?.uuid ?? null,
-    id: service?.id ?? null,
-    name: service?.name ?? service?.title ?? "",
-    duration: service?.duration ?? service?.time ?? service?.minutes ?? null,
-    price: service?.price ?? service?.grossPrice ?? service?.netPrice ?? null,
-    categoryId: category.id,
-    categoryName: category.name,
-    rawCategory: service?.category ?? null
-  };
-}
-
-async function fetchServices(req, token) {
-  const all = [];
+  const allServices = [];
   const seen = new Set();
-  const maxPages = Number(req.query.maxPages || 100);
 
-  for (let page = 1; page <= maxPages; page += 1) {
+  for (let page = 1; page <= 80; page++) {
     const url = new URL("https://wapi.clinicoresuite.app/services");
     url.searchParams.set("page", String(page));
 
-    const passthrough = ["name", "remote", "offices", "categoryId"];
-    for (const key of passthrough) {
-      if (req.query[key] !== undefined && req.query[key] !== null && req.query[key] !== "") {
-        url.searchParams.set(key, String(req.query[key]));
-      }
+    if (req?.query?.users) {
+      url.searchParams.set("users", String(req.query.users));
+    } else if (req?.query?.user) {
+      url.searchParams.set("users", String(req.query.user));
     }
 
-    if (req.query.users) {
-      url.searchParams.set("users", String(req.query.users));
-    } else if (req.query.user) {
-      url.searchParams.set("users", String(req.query.user));
+    if (req?.query?.offices) url.searchParams.set("offices", String(req.query.offices));
+    if (req?.query?.remote !== undefined && req.query.remote !== null && req.query.remote !== "") {
+      url.searchParams.set("remote", String(req.query.remote));
     }
 
     const response = await fetch(url.toString(), {
@@ -133,78 +71,61 @@ async function fetchServices(req, token) {
     });
 
     const text = await response.text();
-    let data;
 
+    let data;
     try {
       data = JSON.parse(text);
     } catch (error) {
-      const err = new Error("Invalid JSON from Clinicoresuite services endpoint");
-      err.status = 502;
-      err.details = {
-        upstreamStatus: response.status,
-        raw: text
-      };
-      throw err;
+      throw new Error(`Invalid JSON from Clinicore services endpoint. HTTP ${response.status}`);
     }
 
     if (!response.ok) {
-      const err = new Error("Clinicoresuite services endpoint returned an error");
-      err.status = response.status;
-      err.details = data;
-      throw err;
+      throw new Error(data?.error || data?.message || `Clinicore services HTTP ${response.status}`);
     }
 
     const items = parseItems(data);
+
     if (!items.length) break;
 
     let added = 0;
+
     for (const item of items) {
-      const key = getServiceId(item);
+      const key = item?.uuid || item?.id || JSON.stringify(item);
       if (seen.has(key)) continue;
       seen.add(key);
-      all.push(item);
-      added += 1;
+      allServices.push(item);
+      added++;
     }
 
     if (!added) break;
   }
 
-  return all;
+  return allServices;
 }
 
-function buildCatalog(services) {
-  const map = new Map();
+function normalizeService(service) {
+  const categoryId = service?.categoryId ?? service?.category_id ?? service?.category?.id ?? null;
+  const categoryName = categoryId ? categoryNameFromId(categoryId) : "Weitere Behandlungen";
 
-  for (const service of services) {
-    const category = getCategory(service);
-    const key = category.id || category.name;
+  return {
+    uuid: service?.uuid || service?.id || null,
+    id: service?.id || service?.uuid || null,
+    name: service?.name || "",
+    description: service?.description || "",
+    duration: service?.duration ?? null,
+    break: service?.break ?? null,
+    language: service?.language || null,
+    categoryId: categoryId || "uncategorized",
+    categoryName,
+    price: service?.price ?? null,
+    raw: service
+  };
+}
 
-    if (!map.has(key)) {
-      map.set(key, {
-        id: category.id,
-        name: category.name,
-        description: category.description || "",
-        services: []
-      });
-    }
-
-    const group = map.get(key);
-
-    if (!group.description && category.description) {
-      group.description = category.description;
-    }
-
-    group.services.push(normalizeService(service, category));
-  }
-
-  return Array.from(map.values())
-    .map((category) => ({
-      ...category,
-      services: category.services.sort((a, b) =>
-        String(a.name || "").localeCompare(String(b.name || ""), "de")
-      )
-    }))
-    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "de"));
+function serviceSort(a, b) {
+  const an = String(a?.name || "");
+  const bn = String(b?.name || "");
+  return an.localeCompare(bn, "de");
 }
 
 export default async function handler(req, res) {
@@ -219,24 +140,65 @@ export default async function handler(req, res) {
   }
 
   try {
-    const token = process.env.CLINICORE_WAPI_TOKEN;
+    const services = (await fetchAllServices(req))
+      .map(normalizeService)
+      .filter((service) => service.uuid && service.name);
 
-    if (!token) {
-      return res.status(500).json({ error: "Missing CLINICORE_WAPI_TOKEN" });
+    const map = new Map();
+
+    for (const service of services) {
+      const id = service.categoryId || "uncategorized";
+      const name = service.categoryName || "Weitere Behandlungen";
+
+      if (!map.has(String(id))) {
+        map.set(String(id), {
+          id,
+          name,
+          description: categoryDescriptionFromName(name),
+          services: []
+        });
+      }
+
+      map.get(String(id)).services.push({
+        uuid: service.uuid,
+        id: service.id,
+        name: service.name,
+        description: service.description,
+        duration: service.duration,
+        break: service.break,
+        language: service.language,
+        categoryId: service.categoryId,
+        categoryName: service.categoryName,
+        price: service.price
+      });
     }
 
-    const services = await fetchServices(req, token);
-    const catalog = buildCatalog(services);
+    const order = ["Beratung", "Biostimulation", "Botulinumtoxin", "Hyaluronsäure", "Mesotherapie", "Infusionstherapie", "Laser", "PRP", "Weitere Behandlungen"];
+
+    const catalog = Array.from(map.values())
+      .map((category) => ({
+        ...category,
+        serviceCount: category.services.length,
+        services: category.services.sort(serviceSort)
+      }))
+      .filter((category) => category.serviceCount > 0)
+      .sort((a, b) => {
+        const ai = order.indexOf(a.name);
+        const bi = order.indexOf(b.name);
+        if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+        return String(a.name).localeCompare(String(b.name), "de");
+      });
 
     return res.status(200).json({
-      categories: catalog,
+      catalog,
+      categories: catalog.map(({ services, ...category }) => category),
       count: catalog.length,
       serviceCount: services.length
     });
   } catch (error) {
-    return res.status(error.status || 500).json({
-      error: error.message || "Unexpected catalog proxy error",
-      ...(error.details ? { details: error.details } : {})
+    return res.status(500).json({
+      error: "Catalog extraction failed",
+      message: error.message
     });
   }
 }
