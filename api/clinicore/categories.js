@@ -1,48 +1,10 @@
-const CATEGORY_NAMES = {
-  368: "Botulinumtoxin",
-  371: "Hyaluronsäure",
-  374: "Biostimulation",
-  380: "PRP",
-  383: "Infusionstherapie",
-  389: "Beratung",
-  392: "Laser",
-  572: "Mesotherapie",
-  599: "Beratung"
-};
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
-function inferCategoryFromServiceName(name) {
-  const n = String(name || "").toLowerCase();
+let catalogCache = null;
+let categoriesCache = null;
 
-  if (/^beratung\b/.test(n)) return { id: 599, name: "Beratung" };
-  if (/\bprp\b/.test(n)) return { id: 380, name: "PRP" };
-  if (/hyaluron|hyaluronidase|lippe|jawline|kinn|mundwinkel|nasolabial|plissefalten|tränenrinne|traenenrinne|wangen|zone hyaluron/.test(n)) {
-    return { id: 371, name: "Hyaluronsäure" };
-  }
-  if (/nctf|profhilo|mesotherapie|\bmeso\b/.test(n)) return { id: 572, name: "Mesotherapie" };
-  if (/botox|botulinum/.test(n)) return { id: 368, name: "Botulinumtoxin" };
-  if (/polynukleotid|radiesse|skinbooster/.test(n)) return { id: 374, name: "Biostimulation" };
-  if (/infusion|drip|vitamin|baseninfusion|inner glow|neuro balance/.test(n)) return { id: 383, name: "Infusionstherapie" };
-  if (/laser|lasemd/.test(n)) return { id: 392, name: "Laser" };
-
-  return { id: "uncategorized", name: "Weitere Behandlungen" };
-}
-
-function categoryNameFromId(id) {
-  return CATEGORY_NAMES[String(id)] || `Kategorie ${id}`;
-}
-
-function categoryDescriptionFromName(name) {
-  return {
-    Beratung: "Erstgespräche und individuelle Beratung.",
-    Biostimulation: "Skinbooster, Polynukleotide und regenerative Behandlungen.",
-    Botulinumtoxin: "Botox-Behandlungen und verwandte Leistungen.",
-    Hyaluronsäure: "Hyaluron-Filler und konturierende Behandlungen.",
-    Mesotherapie: "Mesotherapie, Profhilo und NCTF.",
-    Infusionstherapie: "Performance Drips und Infusionsleistungen.",
-    Laser: "Laser- und apparative Behandlungen.",
-    PRP: "PRP Face, Haare und Augen.",
-    "Weitere Behandlungen": "Weitere Leistungen."
-  }[name] || "";
+function isFresh(entry) {
+  return entry && entry.expiresAt > Date.now();
 }
 
 function setCors(res) {
@@ -51,65 +13,85 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, AuthorizationToken, Accept");
 }
 
+function setCacheHeaders(res) {
+  res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=600");
+}
+
 function parseItems(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.["hydra:member"])) return data["hydra:member"];
   if (Array.isArray(data?.items)) return data.items;
   if (Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.services)) return data.services;
+  if (Array.isArray(data?.categories)) return data.categories;
+  if (Array.isArray(data?.serviceCategories)) return data.serviceCategories;
   return [];
 }
 
-async function fetchAllServices(req) {
+function getToken() {
   const token = process.env.CLINICORE_WAPI_TOKEN;
+  if (!token) throw new Error("Missing CLINICORE_WAPI_TOKEN");
+  return token;
+}
 
-  if (!token) {
-    throw new Error("Missing CLINICORE_WAPI_TOKEN");
+async function clinicoreGet(path, req, extraParams = {}) {
+  const token = getToken();
+  const url = new URL(`https://wapi.clinicoresuite.app${path}`);
+
+  for (const [key, value] of Object.entries(extraParams)) {
+    if (value !== undefined && value !== null && value !== "") {
+      url.searchParams.set(key, String(value));
+    }
   }
 
+  if (req?.query?.users) url.searchParams.set("users", String(req.query.users));
+  else if (req?.query?.user) url.searchParams.set("users", String(req.query.user));
+
+  if (req?.query?.offices) url.searchParams.set("offices", String(req.query.offices));
+
+  if (req?.query?.remote !== undefined && req.query.remote !== null && req.query.remote !== "") {
+    url.searchParams.set("remote", String(req.query.remote));
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      AuthorizationToken: token,
+      Accept: "application/json"
+    }
+  });
+
+  const text = await response.text();
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON from Clinicore ${path}. HTTP ${response.status}`);
+  }
+
+  if (!response.ok) {
+    const msg = data?.error || data?.message || `Clinicore ${path} HTTP ${response.status}`;
+    const error = new Error(msg);
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
+}
+
+async function fetchAllServices(req) {
   const allServices = [];
   const seen = new Set();
 
   for (let page = 1; page <= 80; page++) {
-    const url = new URL("https://wapi.clinicoresuite.app/services");
-    url.searchParams.set("page", String(page));
-
-    if (req?.query?.users) {
-      url.searchParams.set("users", String(req.query.users));
-    } else if (req?.query?.user) {
-      url.searchParams.set("users", String(req.query.user));
-    }
-
-    if (req?.query?.offices) url.searchParams.set("offices", String(req.query.offices));
-    if (req?.query?.remote !== undefined && req.query.remote !== null && req.query.remote !== "") {
-      url.searchParams.set("remote", String(req.query.remote));
-    }
-
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        AuthorizationToken: token,
-        Accept: "application/json"
-      }
-    });
-
-    const text = await response.text();
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (error) {
-      throw new Error(`Invalid JSON from Clinicore services endpoint. HTTP ${response.status}`);
-    }
-
-    if (!response.ok) {
-      throw new Error(data?.error || data?.message || `Clinicore services HTTP ${response.status}`);
-    }
-
+    const data = await clinicoreGet("/services", req, { page });
     const items = parseItems(data);
+
     if (!items.length) break;
 
     let added = 0;
+
     for (const item of items) {
       const key = item?.uuid || item?.id || JSON.stringify(item);
       if (seen.has(key)) continue;
@@ -124,17 +106,83 @@ async function fetchAllServices(req) {
   return allServices;
 }
 
-function normalizeService(service) {
-  const directCategoryId = service?.categoryId ?? service?.category_id ?? service?.category?.id ?? null;
+function extractCategoryId(service) {
+  return service?.categoryId ?? service?.category_id ?? service?.category?.id ?? service?.category?.uuid ?? null;
+}
 
-  let categoryId = directCategoryId;
-  let categoryName = categoryId ? categoryNameFromId(categoryId) : "";
+function extractServiceCategoryName(service) {
+  return (
+    service?.categoryName ||
+    service?.category_name ||
+    service?.category?.name ||
+    service?.category?.title ||
+    service?.categoryTitle ||
+    service?.category_title ||
+    ""
+  );
+}
 
-  if (!categoryId || /^Kategorie\s+\d+$/i.test(categoryName)) {
-    const inferred = inferCategoryFromServiceName(service?.name);
-    categoryId = inferred.id;
-    categoryName = inferred.name;
+function normalizeCategoryItem(item) {
+  if (!item || typeof item !== "object") return null;
+
+  const id = item.id ?? item.uuid ?? item.categoryId ?? item.category_id ?? item["@id"] ?? null;
+  const name = item.name ?? item.title ?? item.label ?? item.categoryName ?? item.category_name ?? "";
+  const description = item.description ?? item.desc ?? item.subtitle ?? "";
+
+  if (id === null || id === undefined || !String(name).trim()) return null;
+
+  return {
+    id,
+    name: String(name).trim(),
+    description: String(description || "").trim()
+  };
+}
+
+async function fetchCategoryMap(req) {
+  const candidates = [
+    "/service-categories",
+    "/service_categories",
+    "/serviceCategories",
+    "/services/categories",
+    "/service/category",
+    "/categories",
+    "/categories/services"
+  ];
+
+  const map = new Map();
+  const tried = [];
+
+  for (const path of candidates) {
+    try {
+      const data = await clinicoreGet(path, req);
+      const items = parseItems(data);
+      tried.push({ path, status: "ok", count: items.length });
+
+      for (const item of items) {
+        const category = normalizeCategoryItem(item);
+        if (category) map.set(String(category.id), category);
+      }
+
+      if (map.size) break;
+    } catch (error) {
+      tried.push({ path, status: error.status || "error", message: error.message });
+    }
   }
+
+  return { map, tried };
+}
+
+function normalizeService(service, categoryMap) {
+  const categoryId = extractCategoryId(service);
+  const categoryNameFromService = extractServiceCategoryName(service);
+  const mapped = categoryId !== null && categoryId !== undefined ? categoryMap.get(String(categoryId)) : null;
+
+  const categoryName =
+    mapped?.name ||
+    categoryNameFromService ||
+    (categoryId !== null && categoryId !== undefined ? `Kategorie ${categoryId}` : "Weitere Behandlungen");
+
+  const categoryDescription = mapped?.description || "";
 
   return {
     uuid: service?.uuid || service?.id || null,
@@ -144,82 +192,119 @@ function normalizeService(service) {
     duration: service?.duration ?? null,
     break: service?.break ?? null,
     language: service?.language || null,
-    categoryId,
+    categoryId: categoryId ?? "uncategorized",
     categoryName,
-    price: service?.price ?? null,
-    raw: service
+    categoryDescription,
+    price: service?.price ?? null
   };
 }
 
 function serviceSort(a, b) {
-  const an = String(a?.name || "");
-  const bn = String(b?.name || "");
-  return an.localeCompare(bn, "de");
+  return String(a?.name || "").localeCompare(String(b?.name || ""), "de");
 }
 
 function categorySort(a, b) {
-  const order = [
-    "Beratung",
-    "Biostimulation",
-    "Botulinumtoxin",
-    "Hyaluronsäure",
-    "Mesotherapie",
-    "Infusionstherapie",
-    "Laser",
-    "PRP",
-    "Weitere Behandlungen"
-  ];
+  return String(a?.name || "").localeCompare(String(b?.name || ""), "de");
+}
 
-  const ai = order.indexOf(a.name);
-  const bi = order.indexOf(b.name);
+function groupCatalog(services) {
+  const map = new Map();
 
-  if (ai !== -1 || bi !== -1) {
-    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+  for (const service of services) {
+    const id = service.categoryId ?? "uncategorized";
+    const key = String(id);
+    const name = service.categoryName || "Weitere Behandlungen";
+
+    if (!map.has(key)) {
+      map.set(key, {
+        id,
+        name,
+        description: service.categoryDescription || "",
+        services: []
+      });
+    }
+
+    map.get(key).services.push({
+      uuid: service.uuid,
+      id: service.id,
+      name: service.name,
+      description: service.description,
+      duration: service.duration,
+      break: service.break,
+      language: service.language,
+      categoryId: service.categoryId,
+      categoryName: service.categoryName,
+      price: service.price
+    });
   }
 
-  return String(a.name).localeCompare(String(b.name), "de");
+  return Array.from(map.values())
+    .map((category) => ({
+      ...category,
+      serviceCount: category.services.length,
+      services: category.services.sort(serviceSort)
+    }))
+    .filter((category) => category.serviceCount > 0)
+    .sort(categorySort);
+}
+
+async function buildCatalog(req) {
+  const { map: categoryMap, tried } = await fetchCategoryMap(req);
+  const services = (await fetchAllServices(req))
+    .map((service) => normalizeService(service, categoryMap))
+    .filter((service) => service.uuid && service.name);
+
+  const catalog = groupCatalog(services);
+
+  return {
+    catalog,
+    categories: catalog.map(({ services, ...category }) => category),
+    count: catalog.length,
+    serviceCount: services.length,
+    categorySource: categoryMap.size ? "clinicore-category-endpoint" : "service-fields-or-category-id-fallback",
+    categoryEndpointDebug: tried
+  };
+}
+
+function shouldBypassCache(req) {
+  return req?.query?.refresh === "1" || req?.query?.nocache === "1";
 }
 
 export default async function handler(req, res) {
   setCors(res);
+  setCacheHeaders(res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "GET") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const services = (await fetchAllServices(req)).map(normalizeService);
-    const map = new Map();
+    const debug = req.query.debug === "1";
+    const bypass = shouldBypassCache(req);
 
-    for (const service of services) {
-      const id = service.categoryId || "uncategorized";
-      const name = service.categoryName || "Weitere Behandlungen";
-
-      if (!map.has(String(id))) {
-        map.set(String(id), {
-          id,
-          name,
-          description: categoryDescriptionFromName(name),
-          serviceCount: 0
-        });
-      }
-
-      map.get(String(id)).serviceCount++;
+    if (!bypass && isFresh(categoriesCache)) {
+      const cached = { ...categoriesCache.value };
+      if (!debug) delete cached.categoryEndpointDebug;
+      return res.status(200).json({ ...cached, cache: "hit" });
     }
 
-    const categories = Array.from(map.values())
-      .filter((category) => category.serviceCount > 0)
-      .sort(categorySort);
+    const built = await buildCatalog(req);
+    const payload = {
+      categories: built.categories,
+      count: built.count,
+      serviceCount: built.serviceCount,
+      categorySource: built.categorySource,
+      categoryEndpointDebug: built.categoryEndpointDebug
+    };
 
-    return res.status(200).json({
-      categories,
-      count: categories.length,
-      serviceCount: services.length
-    });
+    categoriesCache = {
+      value: payload,
+      expiresAt: Date.now() + CACHE_TTL_MS
+    };
+
+    const response = { ...payload };
+    if (!debug) delete response.categoryEndpointDebug;
+
+    return res.status(200).json({ ...response, cache: bypass ? "bypass" : "miss" });
   } catch (error) {
     return res.status(500).json({
       error: "Category extraction failed",

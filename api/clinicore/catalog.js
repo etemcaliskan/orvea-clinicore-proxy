@@ -1,7 +1,20 @@
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+let catalogCache = null;
+let categoriesCache = null;
+
+function isFresh(entry) {
+  return entry && entry.expiresAt > Date.now();
+}
+
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, AuthorizationToken, Accept");
+}
+
+function setCacheHeaders(res) {
+  res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=600");
 }
 
 function parseItems(data) {
@@ -26,13 +39,16 @@ async function clinicoreGet(path, req, extraParams = {}) {
   const url = new URL(`https://wapi.clinicoresuite.app${path}`);
 
   for (const [key, value] of Object.entries(extraParams)) {
-    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+    if (value !== undefined && value !== null && value !== "") {
+      url.searchParams.set(key, String(value));
+    }
   }
 
   if (req?.query?.users) url.searchParams.set("users", String(req.query.users));
   else if (req?.query?.user) url.searchParams.set("users", String(req.query.user));
 
   if (req?.query?.offices) url.searchParams.set("offices", String(req.query.offices));
+
   if (req?.query?.remote !== undefined && req.query.remote !== null && req.query.remote !== "") {
     url.searchParams.set("remote", String(req.query.remote));
   }
@@ -232,28 +248,65 @@ function groupCatalog(services) {
     .sort(categorySort);
 }
 
+async function buildCatalog(req) {
+  const { map: categoryMap, tried } = await fetchCategoryMap(req);
+  const services = (await fetchAllServices(req))
+    .map((service) => normalizeService(service, categoryMap))
+    .filter((service) => service.uuid && service.name);
+
+  const catalog = groupCatalog(services);
+
+  return {
+    catalog,
+    categories: catalog.map(({ services, ...category }) => category),
+    count: catalog.length,
+    serviceCount: services.length,
+    categorySource: categoryMap.size ? "clinicore-category-endpoint" : "service-fields-or-category-id-fallback",
+    categoryEndpointDebug: tried
+  };
+}
+
+function shouldBypassCache(req) {
+  return req?.query?.refresh === "1" || req?.query?.nocache === "1";
+}
+
 export default async function handler(req, res) {
   setCors(res);
+  setCacheHeaders(res);
 
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const { map: categoryMap, tried } = await fetchCategoryMap(req);
-    const services = (await fetchAllServices(req))
-      .map((service) => normalizeService(service, categoryMap))
-      .filter((service) => service.uuid && service.name);
+    const debug = req.query.debug === "1";
+    const bypass = shouldBypassCache(req);
 
-    const catalog = groupCatalog(services);
+    if (!bypass && isFresh(catalogCache)) {
+      const cached = { ...catalogCache.value };
+      if (!debug) delete cached.categoryEndpointDebug;
+      return res.status(200).json({ ...cached, cache: "hit" });
+    }
 
-    return res.status(200).json({
-      catalog,
-      categories: catalog.map(({ services, ...category }) => category),
-      count: catalog.length,
-      serviceCount: services.length,
-      categorySource: categoryMap.size ? "clinicore-category-endpoint" : "service-fields-or-category-id-fallback",
-      categoryEndpointDebug: req.query.debug ? tried : undefined
-    });
+    const built = await buildCatalog(req);
+
+    const payload = {
+      catalog: built.catalog,
+      categories: built.categories,
+      count: built.count,
+      serviceCount: built.serviceCount,
+      categorySource: built.categorySource,
+      categoryEndpointDebug: built.categoryEndpointDebug
+    };
+
+    catalogCache = {
+      value: payload,
+      expiresAt: Date.now() + CACHE_TTL_MS
+    };
+
+    const response = { ...payload };
+    if (!debug) delete response.categoryEndpointDebug;
+
+    return res.status(200).json({ ...response, cache: bypass ? "bypass" : "miss" });
   } catch (error) {
     return res.status(500).json({
       error: "Catalog extraction failed",
