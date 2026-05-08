@@ -2,7 +2,6 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -131,8 +130,7 @@ export default async function handler(req, res) {
       return res.status(502).json({
         error: "Invalid response from Clinicoresuite order endpoint",
         upstreamStatus: response.status,
-        raw: text,
-        _debug: { endpoint:"book", outgoingPayload:Object.fromEntries(payload), upstreamStatus:response.status }
+        raw: text
       });
     }
 
