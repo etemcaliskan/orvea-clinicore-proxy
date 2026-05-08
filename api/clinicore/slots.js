@@ -11,23 +11,20 @@ export default async function handler(req, res) {
   try {
     const token = process.env.CLINICORE_WAPI_TOKEN;
     const { service, user, date, days, remote } = req.query;
-    const office = req.query.office_id || req.query.office || req.query.offices;
 
     if (!token) return res.status(500).json({ error: "Missing CLINICORE_WAPI_TOKEN" });
     if (!service) return res.status(400).json({ error: "Missing service" });
 
     const url = new URL("https://wapi.clinicoresuite.app/slots");
     url.searchParams.set("service", service);
-    if (user) url.searchParams.set("user", user);
+
+    // Wichtig: Clinicoresuite erwartet für den Behandler users[].
+    // Das Frontend sendet weiterhin user=..., damit der bestehende Embed-Code stabil bleibt.
+    if (user) url.searchParams.set("users[]", user);
+
     if (date) url.searchParams.set("date", date);
     if (days) url.searchParams.set("days", days);
     if (remote) url.searchParams.set("remote", remote);
-
-    if (office) {
-      url.searchParams.set("office_id", office);
-      url.searchParams.set("office", office);
-      url.searchParams.set("offices", office);
-    }
 
     const upstream = await fetch(url.toString(), {
       method: "GET",
@@ -40,8 +37,11 @@ export default async function handler(req, res) {
 
     const text = await upstream.text();
     let data;
-    try { data = JSON.parse(text); }
-    catch { return res.status(500).json({ error: "Invalid JSON from Clinicoresuite", raw: text }); }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return res.status(500).json({ error: "Invalid JSON from Clinicoresuite", raw: text });
+    }
 
     return res.status(upstream.status).json(data);
   } catch (error) {
