@@ -2,10 +2,14 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
     const body = req.body || {};
@@ -28,9 +32,27 @@ export default async function handler(req, res) {
     ];
 
     for (const field of requiredFields) {
-      if (body[field] === undefined || body[field] === null || body[field] === "") {
-        return res.status(400).json({ error: `Missing required field: ${field}` });
+      if (
+        body[field] === undefined ||
+        body[field] === null ||
+        body[field] === ""
+      ) {
+        return res.status(400).json({
+          error: `Missing required field: ${field}`
+        });
       }
+    }
+
+    const hasAnyDocumentField =
+      !!body.document_country || !!body.document_type || !!body.document_value;
+
+    const hasAllDocumentFields =
+      !!body.document_country && !!body.document_type && !!body.document_value;
+
+    if (hasAnyDocumentField && !hasAllDocumentFields) {
+      return res.status(400).json({
+        error: "document_country, document_type and document_value must be provided together"
+      });
     }
 
     const payload = new URLSearchParams();
@@ -52,9 +74,43 @@ export default async function handler(req, res) {
     payload.set("source", String(body.source || "dedicated"));
     payload.set("allow_payment", String(body.allow_payment || "1"));
 
-    if (body.document_country) payload.set("document_country", String(body.document_country));
-    if (body.document_type) payload.set("document_type", String(body.document_type));
-    if (body.document_value) payload.set("document_value", String(body.document_value));
+    if (hasAllDocumentFields) {
+      payload.set("document_country", String(body.document_country));
+      payload.set("document_type", String(body.document_type));
+      payload.set("document_value", String(body.document_value));
+    }
+
+    if (body.patient_pesel) {
+      payload.set("patient_pesel", String(body.patient_pesel));
+    }
+
+    if (body.patient_zip) {
+      payload.set("patient_zip", String(body.patient_zip));
+    }
+
+    if (body.patient_city) {
+      payload.set("patient_city", String(body.patient_city));
+    }
+
+    if (body.patient_street) {
+      payload.set("patient_street", String(body.patient_street));
+    }
+
+    if (body.patient_home_number) {
+      payload.set("patient_home_number", String(body.patient_home_number));
+    }
+
+    if (body.patient_home_place) {
+      payload.set("patient_home_place", String(body.patient_home_place));
+    }
+
+    if (body.chosen_facility) {
+      payload.set("chosen_facility", String(body.chosen_facility));
+    }
+
+    if (body.discount_uuid) {
+      payload.set("discount_uuid", String(body.discount_uuid));
+    }
 
     const response = await fetch("https://clinicoresuite.app/rejestracja/order", {
       method: "POST",
@@ -70,14 +126,15 @@ export default async function handler(req, res) {
     let data;
     try {
       data = JSON.parse(text);
-      return res.status(response.status).json(data);
-    } catch {
-      return res.status(200).json({
-        success: response.ok,
-        status: response.status,
+    } catch (e) {
+      return res.status(502).json({
+        error: "Invalid response from Clinicoresuite order endpoint",
+        upstreamStatus: response.status,
         raw: text
       });
     }
+
+    return res.status(response.status).json(data);
   } catch (error) {
     return res.status(500).json({
       error: "Unexpected booking proxy error",
