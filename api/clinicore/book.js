@@ -45,9 +45,8 @@ export default async function handler(req, res) {
 
     const payload = new URLSearchParams();
 
-    payload.set("reg", String(body.reg));
-    payload.set("terms",
-      "chosen_user", String(body.terms));
+    payload.set("reg", "1");
+    payload.set("terms", "1");
     payload.set("chosen_user", String(body.chosen_user));
     payload.set("chosen_service", String(body.chosen_service));
     payload.set("office_id", String(body.office_id));
