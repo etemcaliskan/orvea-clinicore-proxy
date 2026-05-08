@@ -15,13 +15,12 @@ function asArray(value) {
 
 export default async function handler(req, res) {
   setCors(res);
-
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   try {
     const token = process.env.CLINICORE_WAPI_TOKEN;
-    const { service, date, days, offices, remote } = req.query;
+    const { service, date, days, offices, office_id, remote } = req.query;
 
     if (!token) return res.status(500).json({ error: "Missing CLINICORE_WAPI_TOKEN" });
     if (!service) return res.status(400).json({ error: "Missing service" });
@@ -34,33 +33,25 @@ export default async function handler(req, res) {
 
     const url = new URL("https://wapi.clinicoresuite.app/slots");
     url.searchParams.set("service", String(service));
-
-    for (const user of users) {
-      url.searchParams.append("users[]", user);
-    }
-
+    for (const user of users) url.searchParams.append("users[]", user);
     if (date) url.searchParams.set("date", String(date));
     if (days) url.searchParams.set("days", String(days));
-    if (offices) url.searchParams.set("offices", String(offices));
+    if (offices || office_id) url.searchParams.set("offices", String(offices || office_id));
     if (remote !== undefined && remote !== null && remote !== "") url.searchParams.set("remote", String(remote));
 
     const response = await fetch(url.toString(), {
       method: "GET",
-      headers: {
-        AuthorizationToken: token,
-        Accept: "application/json"
-      }
+      headers: { AuthorizationToken: token, Accept: "application/json" }
     });
 
     const text = await response.text();
     let data;
-
-    try {
-      data = JSON.parse(text);
-    } catch {
+    try { data = JSON.parse(text); }
+    catch {
       return res.status(502).json({
         error: "Invalid JSON from Clinicoresuite slots endpoint",
         upstreamStatus: response.status,
+        requestedUrl: url.toString(),
         raw: text
       });
     }
@@ -68,16 +59,17 @@ export default async function handler(req, res) {
     if (req.query.debug === "1") {
       return res.status(response.status).json({
         ...data,
-        requestedUrl: url.toString(),
-        upstreamStatus: response.status
+        _debug: {
+          endpoint: "slots",
+          requestedUrl: url.toString(),
+          upstreamStatus: response.status,
+          receivedQuery: req.query
+        }
       });
     }
 
     return res.status(response.status).json(data);
   } catch (error) {
-    return res.status(500).json({
-      error: "Unexpected slots proxy error",
-      message: error.message
-    });
+    return res.status(500).json({ error: "Unexpected slots proxy error", message: error.message });
   }
 }
