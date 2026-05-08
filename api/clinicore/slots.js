@@ -18,18 +18,18 @@ export default async function handler(req, res) {
 
     const url = new URL("https://wapi.clinicoresuite.app/slots");
     url.searchParams.set("service", service);
-    if (user) url.searchParams.set("users[]", user);
+    if (user) url.searchParams.set("user", user);
     if (date) url.searchParams.set("date", date);
     if (days) url.searchParams.set("days", days);
     if (remote) url.searchParams.set("remote", remote);
 
     if (office) {
-      url.searchParams.set("offices", office);
-      url.searchParams.set("offices[]", office);
       url.searchParams.set("office_id", office);
+      url.searchParams.set("office", office);
+      url.searchParams.set("offices", office);
     }
 
-    const response = await fetch(url.toString(), {
+    const upstream = await fetch(url.toString(), {
       method: "GET",
       headers: {
         AuthorizationToken: token,
@@ -38,12 +38,12 @@ export default async function handler(req, res) {
       }
     });
 
-    const text = await response.text();
+    const text = await upstream.text();
     let data;
     try { data = JSON.parse(text); }
     catch { return res.status(500).json({ error: "Invalid JSON from Clinicoresuite", raw: text }); }
 
-    return res.status(response.status).json(data);
+    return res.status(upstream.status).json(data);
   } catch (error) {
     return res.status(500).json({ error: "Unexpected proxy error", message: error.message });
   }
