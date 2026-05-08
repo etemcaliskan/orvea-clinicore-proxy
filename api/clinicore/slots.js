@@ -1,125 +1,118 @@
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, AuthorizationToken, Accept");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
 
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
+  const service = String(req.query.service || req.query.service_uuid || "");
+  const user = String(req.query.user || req.query.users || req.query.user_uuid || "");
+  const days = Math.max(4, Math.min(180, Number(req.query.days || 180)));
+  const startDate = String(req.query.date || req.query.current_time || new Date().toISOString().slice(0,10)).slice(0,10);
+  const facility = String(req.query.facility_uuid || process.env.CLINICORE_FACILITY_UUID || "022ee251-93ad-9357-751b-38677fa760dd");
+  const screenWidth = String(req.query.screen_width || 488);
+
+  if (!service) return res.status(400).json({ error: "Missing service" });
+  if (!user) return res.status(400).json({ error: "Missing user" });
+
+  function iso(d) {
+    return d.toISOString().slice(0,10);
+  }
+
+  function addDays(isoDate, n) {
+    const d = new Date(isoDate + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + n);
+    return iso(d);
+  }
+
+  function normaliseTime(t) {
+    const m = String(t || "").match(/(\d{1,2}):(\d{2})/);
+    if (!m) return "";
+    return String(m[1]).padStart(2,"0") + ":" + m[2];
+  }
+
+  async function fetchFrame(currentTime) {
+    const url = new URL("https://registration.clinicoresuite.app/register/all_registration_events/");
+    url.searchParams.set("user_uuid", user);
+    url.searchParams.set("service_uuid", service);
+    url.searchParams.set("office_id", "");
+    url.searchParams.set("facility_uuid", facility);
+    url.searchParams.set("current_time", currentTime);
+    url.searchParams.set("screen_width", screenWidth);
+
+    const r = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest"
+      },
+      cache: "no-store"
+    });
+
+    const text = await r.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error("Widget endpoint returned invalid JSON: " + text.slice(0, 120));
+    }
+    if (!r.ok) throw new Error(data.error || data.message || "Widget endpoint HTTP " + r.status);
+    return { data, url: url.toString() };
+  }
+
   try {
-    const token = process.env.CLINICORE_WAPI_TOKEN;
-    const service = String(req.query.service || "");
-    const user = String(req.query.user || req.query.users || req.query["users[]"] || "");
-    const days = String(req.query.days || "180");
-    const date = String(req.query.date || new Date().toISOString().slice(0, 10));
-    const remote = req.query.remote;
+    const slots = {};
+    const seenFrames = new Set();
+    let cursor = startDate;
+    let debugFrames = [];
 
-    if (!token) return res.status(500).json({ error: "Missing CLINICORE_WAPI_TOKEN" });
-    if (!service) return res.status(400).json({ error: "Missing service" });
-    if (!user) return res.status(400).json({ error: "Missing user" });
+    // Widget liefert 4 Tage pro Request; wir gehen blockweise weiter.
+    for (let guard = 0; guard < 60; guard++) {
+      if (seenFrames.has(cursor)) break;
+      seenFrames.add(cursor);
 
-    async function callClinicore(url) {
-      const response = await fetch(url.toString(), {
-        method: "GET",
-        headers: {
-          AuthorizationToken: token,
-          Accept: "application/json"
-        },
-        cache: "no-store"
-      });
+      const frame = await fetchFrame(cursor);
+      debugFrames.push({ current_time: cursor, url: frame.url });
+      const schedule = Array.isArray(frame.data.user_schedule) ? frame.data.user_schedule : [];
 
-      const text = await response.text();
-      let data;
+      for (const day of schedule) {
+        const rawDate = day?.date?.date || "";
+        const date = String(rawDate).slice(0,10);
+        if (!date) continue;
 
-      try {
-        data = JSON.parse(text);
-      } catch {
-        return {
-          ok: false,
-          status: response.status,
-          data: {
-            error: "Invalid JSON from Clinicoresuite",
-            raw: text
-          }
-        };
+        const allowed = day.isAllowed !== false && day.isHoliday !== true && day.isPast !== true;
+        const periods = allowed && Array.isArray(day.workingPeriods)
+          ? [...new Set(day.workingPeriods.map(normaliseTime).filter(Boolean))].sort()
+          : [];
+
+        if (periods.length) slots[date] = periods;
       }
 
-      return { ok: response.ok, status: response.status, data };
+      const nextDateRaw = frame.data?.next?.date ? String(frame.data.next.date).slice(0,10) : "";
+      const lastScheduleDate = schedule.length ? String(schedule[schedule.length - 1]?.date?.date || "").slice(0,10) : "";
+      const nextCursor = nextDateRaw || (lastScheduleDate ? addDays(lastScheduleDate, 1) : addDays(cursor, 4));
+
+      if (!nextCursor || nextCursor <= cursor) cursor = addDays(cursor, 4);
+      else cursor = nextCursor;
+
+      const endDate = addDays(startDate, days);
+      if (cursor >= endDate) break;
     }
 
-    function slotCount(data) {
-      const slots = data && data.slots;
-      if (!slots) return 0;
-      if (Array.isArray(slots)) return slots.length;
-      if (typeof slots === "object") {
-        return Object.values(slots).reduce((sum, day) => {
-          if (Array.isArray(day)) return sum + day.length;
-          if (day && typeof day === "object") return sum + Object.keys(day).length;
-          return sum;
-        }, 0);
-      }
-      return 0;
-    }
-
-    const pathUrl = new URL(
-      `https://wapi.clinicoresuite.app/slots/${encodeURIComponent(user)}/${encodeURIComponent(service)}/${encodeURIComponent(days)}/${encodeURIComponent(date)}`
+    const ordered = Object.fromEntries(
+      Object.entries(slots)
+        .filter(([d]) => d >= startDate && d < addDays(startDate, days))
+        .sort(([a],[b]) => a.localeCompare(b))
     );
-    if (remote !== undefined && remote !== null && remote !== "") {
-      pathUrl.searchParams.set("remote", String(remote));
-    }
-
-    const first = await callClinicore(pathUrl);
-
-    if (first.ok && slotCount(first.data) > 0) {
-      if (req.query.debug === "1") {
-        return res.status(first.status).json({
-          ...first.data,
-          _debug: {
-            source: "path",
-            requestedUrl: pathUrl.toString(),
-            upstreamStatus: first.status
-          }
-        });
-      }
-      return res.status(first.status).json(first.data);
-    }
-
-    const queryUrl = new URL("https://wapi.clinicoresuite.app/slots");
-    queryUrl.searchParams.set("service", service);
-    queryUrl.searchParams.set("users", user);
-    queryUrl.searchParams.set("date", date);
-    queryUrl.searchParams.set("days", days);
-    if (remote !== undefined && remote !== null && remote !== "") {
-      queryUrl.searchParams.set("remote", String(remote));
-    }
-
-    const second = await callClinicore(queryUrl);
 
     if (req.query.debug === "1") {
-      return res.status(second.status).json({
-        ...second.data,
-        _debug: {
-          source: "query",
-          requestedUrl: queryUrl.toString(),
-          upstreamStatus: second.status,
-          firstAttempt: {
-            requestedUrl: pathUrl.toString(),
-            upstreamStatus: first.status,
-            slotCount: slotCount(first.data),
-            error: first.data?.error || null
-          }
-        }
-      });
+      return res.status(200).json({ slots: ordered, nextFreeVisits: [], _debug: { source: "registration_widget_all_registration_events", frames: debugFrames } });
     }
 
-    return res.status(second.status).json(second.data);
-  } catch (error) {
-    return res.status(500).json({
-      error: "Unexpected slots proxy error",
-      message: error.message
-    });
+    return res.status(200).json({ slots: ordered, nextFreeVisits: [] });
+  } catch (e) {
+    return res.status(500).json({ error: "Widget slots proxy error", message: e.message });
   }
 }
