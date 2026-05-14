@@ -12,6 +12,7 @@ export default async function handler(req, res) {
   const days = Math.max(4, Math.min(180, Number(req.query.days || 180)));
   const startDate = String(req.query.date || req.query.current_time || new Date().toISOString().slice(0,10)).slice(0,10);
   const facility = String(req.query.facility_uuid || process.env.CLINICORE_FACILITY_UUID || "022ee251-93ad-9357-751b-38677fa760dd");
+  const officeId = String(req.query.office_id || req.query.office || req.query.offices || "");
   const screenWidth = String(req.query.screen_width || 488);
 
   if (!service) return res.status(400).json({ error: "Missing service" });
@@ -37,7 +38,7 @@ export default async function handler(req, res) {
     const url = new URL("https://registration.clinicoresuite.app/register/all_registration_events/");
     url.searchParams.set("user_uuid", user);
     url.searchParams.set("service_uuid", service);
-    url.searchParams.set("office_id", "");
+    url.searchParams.set("office_id", officeId);
     url.searchParams.set("facility_uuid", facility);
     url.searchParams.set("current_time", currentTime);
     url.searchParams.set("screen_width", screenWidth);
