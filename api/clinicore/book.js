@@ -1,5 +1,15 @@
+const ALLOWED_ORIGINS = ["https://orvea.de", "https://www.orvea.de"];
+
+function allowOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
+}
+
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  allowOrigin(req, res);
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
 
@@ -41,6 +51,12 @@ export default async function handler(req, res) {
           error: `Missing required field: ${field}`
         });
       }
+    }
+
+    if (String(body.reg) !== "1" || String(body.terms) !== "1") {
+      return res.status(400).json({
+        error: "Bitte Datenschutzerklärung und AGB bestätigen."
+      });
     }
 
     const payload = new URLSearchParams();

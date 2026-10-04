@@ -1,5 +1,15 @@
+const ALLOWED_ORIGINS = ["https://orvea.de", "https://www.orvea.de"];
+
+function allowOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
+}
+
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  allowOrigin(req, res);
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, AuthorizationToken, Accept");
 

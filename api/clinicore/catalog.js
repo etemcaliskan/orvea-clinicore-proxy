@@ -1,3 +1,13 @@
+const ALLOWED_ORIGINS = ["https://orvea.de", "https://www.orvea.de"];
+
+function allowOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
+}
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 let catalogCache = null;
@@ -7,8 +17,8 @@ function isFresh(entry) {
   return entry && entry.expiresAt > Date.now();
 }
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+function setCors(req, res) {
+  allowOrigin(req, res);
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, AuthorizationToken, Accept");
 }
@@ -271,7 +281,7 @@ function shouldBypassCache(req) {
 }
 
 export default async function handler(req, res) {
-  setCors(res);
+  setCors(req, res);
   setCacheHeaders(res);
 
   if (req.method === "OPTIONS") return res.status(200).end();
