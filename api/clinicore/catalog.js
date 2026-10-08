@@ -8,10 +8,9 @@ function allowOrigin(req, res) {
   res.setHeader("Vary", "Origin");
 }
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
-
-let catalogCache = null;
-let categoriesCache = null;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const catalogEntries = new Map();
+const catalogPending = new Map();
 
 function isFresh(entry) {
   return entry && entry.expiresAt > Date.now();
@@ -23,8 +22,39 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, AuthorizationToken, Accept");
 }
 
-function setCacheHeaders(res) {
-  res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=600");
+function setCacheHeaders(res, entry, bypass = false) {
+  // Keep errors, debug responses and forced refreshes out of shared caches.
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Vercel-CDN-Cache-Control", "no-store");
+  if (!entry || bypass) return;
+  const remaining = Math.floor((entry.expiresAt - Date.now()) / 1000);
+  if (remaining < 1) return;
+  res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
+  res.setHeader("Vercel-CDN-Cache-Control", `public, s-maxage=${remaining}`);
+}
+
+function catalogKey(req) {
+  const q = req.query || {};
+  return JSON.stringify([
+    String(q.users || q.user || ""),
+    String(q.offices || ""),
+    String(q.remote ?? "")
+  ]);
+}
+
+async function loadCatalog(req, key) {
+  if (catalogPending.has(key)) return catalogPending.get(key);
+  const pending = buildCatalog(req).then(value => {
+    const entry = { value, expiresAt: Date.now() + CACHE_TTL_MS };
+    for (const [k, old] of catalogEntries) {
+      if (!isFresh(old)) catalogEntries.delete(k);
+    }
+    if (catalogEntries.size >= 100) catalogEntries.delete(catalogEntries.keys().next().value);
+    catalogEntries.set(key, entry);
+    return entry;
+  }).finally(() => catalogPending.delete(key));
+  catalogPending.set(key, pending);
+  return pending;
 }
 
 function parseItems(data) {
@@ -288,36 +318,19 @@ export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const debug = req.query.debug === "1";
+    const debug = req.query?.debug === "1";
     const bypass = shouldBypassCache(req);
+    const key = catalogKey(req);
+    let entry = catalogEntries.get(key);
+    const hit = !bypass && isFresh(entry);
+    if (!hit) entry = await loadCatalog(req, key);
 
-    if (!bypass && isFresh(catalogCache)) {
-      const cached = { ...catalogCache.value };
-      if (!debug) delete cached.categoryEndpointDebug;
-      return res.status(200).json({ ...cached, cache: "hit" });
-    }
-
-    const built = await buildCatalog(req);
-
-    const payload = {
-      catalog: built.catalog,
-      categories: built.categories,
-      count: built.count,
-      serviceCount: built.serviceCount,
-      categorySource: built.categorySource,
-      categoryEndpointDebug: built.categoryEndpointDebug
-    };
-
-    catalogCache = {
-      value: payload,
-      expiresAt: Date.now() + CACHE_TTL_MS
-    };
-
-    const response = { ...payload };
+    const response = { ...entry.value };
     if (!debug) delete response.categoryEndpointDebug;
-
-    return res.status(200).json({ ...response, cache: bypass ? "bypass" : "miss" });
+    setCacheHeaders(res, entry, bypass || debug);
+    return res.status(200).json({ ...response, cache: bypass ? "bypass" : hit ? "hit" : "miss" });
   } catch (error) {
+    setCacheHeaders(res);
     return res.status(500).json({
       error: "Catalog extraction failed",
       message: error.message
