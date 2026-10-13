@@ -1,3 +1,5 @@
+import { readResponse, httpError } from '../../lib/clinicore.js';
+export const config = { maxDuration: 30 };
 const ALLOWED_ORIGINS = ["https://orvea.de", "https://www.orvea.de"];
 
 function allowOrigin(req, res) {
@@ -8,10 +10,9 @@ function allowOrigin(req, res) {
   res.setHeader("Vary", "Origin");
 }
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-let catalogCache = null;
-let categoriesCache = null;
+const catalogs = new Map(), pendingCatalogs = new Map();
 
 function isFresh(entry) {
   return entry && entry.expiresAt > Date.now();
@@ -23,8 +24,14 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, AuthorizationToken, Accept");
 }
 
-function setCacheHeaders(res) {
-  res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=600");
+function setCacheHeaders(res, entry, bypass = false) {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Vercel-CDN-Cache-Control", "no-store");
+  const remaining = entry ? Math.floor((entry.expiresAt - Date.now()) / 1000) : 0;
+  if (!bypass && remaining > 0) {
+    res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
+    res.setHeader("Vercel-CDN-Cache-Control", `public, s-maxage=${remaining}`);
+  }
 }
 
 function parseItems(data) {
@@ -63,15 +70,15 @@ async function clinicoreGet(path, req, extraParams = {}) {
     url.searchParams.set("remote", String(req.query.remote));
   }
 
-  const response = await fetch(url.toString(), {
+  const remaining = (req.obDeadline || Date.now() + 18000) - Date.now();
+  if (remaining <= 0) throw httpError("Katalog lädt zu langsam. Bitte erneut versuchen.", 504);
+  const { response, text } = await readResponse(url.toString(), {
     method: "GET",
     headers: {
       AuthorizationToken: token,
       Accept: "application/json"
     }
-  });
-
-  const text = await response.text();
+  }, Math.min(8000, remaining));
 
   let data;
   try {
@@ -259,8 +266,8 @@ function groupCatalog(services) {
 }
 
 async function buildCatalog(req) {
-  const { map: categoryMap, tried } = await fetchCategoryMap(req);
-  const services = (await fetchAllServices(req))
+  const [{ map: categoryMap, tried }, rawServices] = await Promise.all([fetchCategoryMap(req), fetchAllServices(req)]);
+  const services = rawServices
     .map((service) => normalizeService(service, categoryMap))
     .filter((service) => service.uuid && service.name)
     .filter((service) => !isKombiService(service, service.categoryName));
@@ -281,166 +288,34 @@ function shouldBypassCache(req) {
   return req?.query?.refresh === "1" || req?.query?.nocache === "1";
 }
 
-// ---- ORVEA Kombi-Termin (v1, 10.10.2026) ----------------------------------
-// Mehrere gewaehlte Behandlungen werden im Hintergrund als EIN Kombi-Termin
-// gebucht. Kombi-Leistungen erkennt der Proxy am Namen ("Kombi...") oder an
-// einer Clinicore-Kategorie, deren Name "Kombi" oder "Intern" enthaelt.
-// Sie werden im Buchungstool nie angezeigt.
-const KOMBI_MIN = 60;
-const KOMBI_MAX = 120;
-const KOMBI_STEP = 5;
-const KOMBI_TTL_MS = 5 * 60 * 1000;
-let kombiCache = null;
-
-function kombiItems(data) {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.["hydra:member"])) return data["hydra:member"];
-  if (Array.isArray(data?.items)) return data.items;
-  if (Array.isArray(data?.data)) return data.data;
-  return [];
-}
-
-async function kombiGet(path, params = {}) {
-  const token = process.env.CLINICORE_WAPI_TOKEN;
-  if (!token) throw new Error("Missing CLINICORE_WAPI_TOKEN");
-  const url = new URL("https://wapi.clinicoresuite.app" + path);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
-  const r = await fetch(url.toString(), { headers: { AuthorizationToken: token, Accept: "application/json" } });
-  const data = await r.json().catch(() => null);
-  if (!r.ok || !data) throw new Error("Clinicore " + path + " HTTP " + r.status);
-  return data;
-}
-
-function kombiCategoryId(s) {
-  return s?.categoryId ?? s?.category_id ?? s?.category?.id ?? null;
-}
-
 function isKombiService(service, categoryName) {
-  const name = String(service?.name || "");
-  const cat = String(categoryName || service?.categoryName || service?.category?.name || "");
-  return /kombi/i.test(name) || /kombi|intern/i.test(cat);
+  return /kombi/i.test(String(service?.name || "")) || /kombi|intern/i.test(String(categoryName || ""));
 }
-
-async function loadServiceIndex() {
-  if (kombiCache && kombiCache.expiresAt > Date.now()) return kombiCache.value;
-  const catNames = new Map();
-  try {
-    for (const c of kombiItems(await kombiGet("/categories"))) {
-      if (c && c.id != null) catNames.set(String(c.id), String(c.name || c.title || ""));
-    }
-  } catch (e) { /* Kategorien optional, Erkennung dann nur ueber den Namen */ }
-  const all = new Map();
-  for (let page = 1; page <= 80; page++) {
-    const items = kombiItems(await kombiGet("/services", { page }));
-    let added = 0;
-    for (const s of items) {
-      const uuid = s?.uuid || s?.id;
-      if (!uuid || all.has(uuid)) continue;
-      const catName = catNames.get(String(kombiCategoryId(s))) || s?.categoryName || "";
-      all.set(uuid, {
-        uuid,
-        name: String(s.name || ""),
-        duration: Number(s.duration) || 0,
-        kombi: isKombiService(s, catName)
-      });
-      added++;
-    }
-    if (!items.length || !added) break;
-  }
-  const value = { all, kombis: [...all.values()].filter((s) => s.kombi && s.duration > 0).sort((a, b) => a.duration - b.duration) };
-  kombiCache = { value, expiresAt: Date.now() + KOMBI_TTL_MS };
-  return value;
-}
-
-function parseServiceList(raw) {
-  const list = String(raw || "").split(",").map((x) => x.trim()).filter(Boolean);
-  const unique = [...new Set(list)];
-  if (!unique.length || unique.length > 10) return [];
-  return unique.every((u) => /^[0-9a-f-]{20,40}$/i.test(u)) ? unique : [];
-}
-
-// Liefert fuer eine Liste von Leistungs-UUIDs die zu buchende Leistung.
-// Eine Leistung: unveraendert. Mehrere: passender Kombi-Termin
-// (Summe der Behandlungsdauern, auf 5 Min. aufgerundet, mind. 60, max. 120).
-async function resolveKombi(rawServices) {
-  const uuids = parseServiceList(rawServices);
-  if (!uuids.length) return { ok: false, error: "Ungueltige Leistung" };
-  if (uuids.length === 1) return { ok: true, multi: false, serviceUuid: uuids[0] };
-
-  const fallback = { ok: true, multi: true, kombi: null, serviceUuid: uuids[uuids.length - 1], items: uuids.map((u) => ({ uuid: u, name: u, duration: 0 })) };
-  let index;
-  try { index = await loadServiceIndex(); } catch (e) { return fallback; }
-
-  const items = uuids.map((u) => index.all.get(u) || { uuid: u, name: u, duration: 0 });
-  fallback.items = items;
-  const sum = items.reduce((t, s) => t + (s.duration || 0), 0);
-  let target = Math.ceil(sum / KOMBI_STEP) * KOMBI_STEP;
-  if (target < KOMBI_MIN) target = KOMBI_MIN;
-  if (target > KOMBI_MAX) target = KOMBI_MAX;
-
-  const kombi =
-    index.kombis.find((k) => k.duration === target) ||
-    index.kombis.find((k) => k.duration >= target) ||
-    index.kombis[index.kombis.length - 1] ||
-    null;
-  if (!kombi) return { ...fallback, sum, target };
-  return { ok: true, multi: true, kombi, serviceUuid: kombi.uuid, items, sum, target };
-}
-
-function kombiNote(r) {
-  if (!r?.multi) return "";
-  const lines = r.items.map((s, i) => (i + 1) + ". " + s.name + (s.duration ? " (" + s.duration + " Min.)" : ""));
-  if (!r.kombi) {
-    return "MEHRERE BEHANDLUNGEN - bitte Termindauer prüfen:\n" + lines.join("\n");
-  }
-  const capped = r.sum > KOMBI_MAX;
-  return "KOMBI-TERMIN " + r.kombi.duration + " Min." +
-    " (Summe " + r.sum + " Min." + (capped ? ", auf " + KOMBI_MAX + " Min. begrenzt – Termindauer prüfen" : "") + "):\n" +
-    lines.join("\n");
-}
-// ---------------------------------------------------------------------------
 
 export default async function handler(req, res) {
-  setCors(req, res);
-  setCacheHeaders(res);
-
+  setCors(req, res); setCacheHeaders(res);
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
-
   try {
-    const debug = req.query.debug === "1";
-    const bypass = shouldBypassCache(req);
-
-    if (!bypass && isFresh(catalogCache)) {
-      const cached = { ...catalogCache.value };
-      if (!debug) delete cached.categoryEndpointDebug;
-      return res.status(200).json({ ...cached, cache: "hit" });
+    const q = req.query || {}, debug = q.debug === "1", bypass = shouldBypassCache(req);
+    const key = JSON.stringify([String(q.users || q.user || ""), String(q.offices || ""), String(q.remote ?? "")]);
+    let entry = catalogs.get(key);
+    const hit = !bypass && isFresh(entry);
+    if (!hit) {
+      if (!pendingCatalogs.has(key)) pendingCatalogs.set(key, buildCatalog({ ...req, obDeadline: Date.now() + 18000 }).then(value => {
+        const e = { value, expiresAt: Date.now() + CACHE_TTL_MS };
+        for (const [k,v] of catalogs) if (!isFresh(v)) catalogs.delete(k);
+        if (catalogs.size >= 100) catalogs.delete(catalogs.keys().next().value);
+        catalogs.set(key,e); return e;
+      }).finally(() => pendingCatalogs.delete(key)));
+      entry = await pendingCatalogs.get(key);
     }
-
-    const built = await buildCatalog(req);
-
-    const payload = {
-      catalog: built.catalog,
-      categories: built.categories,
-      count: built.count,
-      serviceCount: built.serviceCount,
-      categorySource: built.categorySource,
-      categoryEndpointDebug: built.categoryEndpointDebug
-    };
-
-    catalogCache = {
-      value: payload,
-      expiresAt: Date.now() + CACHE_TTL_MS
-    };
-
-    const response = { ...payload };
+    const response = { ...entry.value };
     if (!debug) delete response.categoryEndpointDebug;
-
-    return res.status(200).json({ ...response, cache: bypass ? "bypass" : "miss" });
+    setCacheHeaders(res,entry,bypass || debug);
+    return res.status(200).json({ ...response, cache: bypass ? "bypass" : hit ? "hit" : "miss" });
   } catch (error) {
-    return res.status(500).json({
-      error: "Catalog extraction failed",
-      message: error.message
-    });
+    setCacheHeaders(res);
+    return res.status(error.status || 502).json({ error: "Catalog extraction failed", message: error.message });
   }
 }
