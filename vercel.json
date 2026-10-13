@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/clinicore/slots.js": { "maxDuration": 30 },
+    "api/clinicore/book.js": { "maxDuration": 30 },
+    "api/clinicore/catalog.js": { "maxDuration": 30 }
+  }
+}
